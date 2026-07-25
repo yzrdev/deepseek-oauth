@@ -59,6 +59,11 @@ export class DeepSeekSSEParser {
         throw new Error(`DeepSeek API error: ${data.biz_msg || `biz_code ${data.biz_code}`}`);
       }
 
+      if (typeof parsed.response_message_id === "number") {
+        this.messageId = parsed.response_message_id;
+        return;
+      }
+
       if (
         "v" in parsed &&
         typeof parsed.v === "object" &&
@@ -77,14 +82,22 @@ export class DeepSeekSSEParser {
     }
   }
 
+  private fragmentContent(val: unknown): string {
+    if (val == null) return "";
+    if (typeof val === "string") return val;
+    return JSON.stringify(val);
+  }
+
   private handleSnapshot(snapshot: SSESnapshot): void {
     for (const fragment of snapshot.response.fragments) {
       if (fragment.type === "RESPONSE") {
-        this.textBuffer += fragment.content;
+        this.textBuffer += this.fragmentContent(fragment.content);
         this.activeFragmentType = "RESPONSE";
       } else if (fragment.type === "THINK" || fragment.type === "THINKING") {
-        this.thinkingBuffer += fragment.content;
+        this.thinkingBuffer += this.fragmentContent(fragment.content);
         this.activeFragmentType = "THINK";
+      } else if (fragment.content != null) {
+        this.textBuffer += this.fragmentContent(fragment.content);
       }
     }
     this.activePath = "response/fragments/-1/content";
@@ -107,11 +120,13 @@ export class DeepSeekSSEParser {
       if (patch.p === "response/fragments" && patch.o === "APPEND" && Array.isArray(patch.v)) {
         for (const f of patch.v) {
           if (f.type === "THINK" || f.type === "THINKING") {
-            this.thinkingBuffer += f.content ?? "";
+            this.thinkingBuffer += this.fragmentContent(f.content);
             this.activeFragmentType = "THINK";
           } else if (f.type === "RESPONSE") {
-            this.textBuffer += f.content ?? "";
+            this.textBuffer += this.fragmentContent(f.content);
             this.activeFragmentType = "RESPONSE";
+          } else if (f.content != null) {
+            this.textBuffer += this.fragmentContent(f.content);
           }
         }
 

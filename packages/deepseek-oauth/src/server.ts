@@ -192,7 +192,7 @@ async function handleRequest(
     }
 
     const body = await readBody(req);
-    const sessionKey = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
+    const sessionKey = req.socket.remoteAddress ?? "127.0.0.1";
     const existingSessionId =
       (req.headers["x-deepseek-chat-session-id"] as string) ||
       sessions.get(sessionKey) ||

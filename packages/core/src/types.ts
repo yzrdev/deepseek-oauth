@@ -31,8 +31,8 @@ export interface DeepSeekChatSession {
 export interface SSESnapshot {
   response: {
     fragments: Array<{
-      type: "RESPONSE" | "THINK" | "THINKING";
-      content: string;
+      type: string;
+      content: unknown;
     }>;
   };
 }

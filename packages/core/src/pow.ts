@@ -35,7 +35,7 @@ function loadWasm(): typeof wasmSolve {
     buf2.set(saltBytes, 0);
     buf2.set(targetBytes, 256);
 
-    const answer = (instance.exports.solve_pow as CallableFunction)(
+    const answer = (instance.exports.solve_pow_opt as CallableFunction)(
       0,
       saltBytes.length,
       BigInt(expireAt),
