@@ -29,12 +29,11 @@ function findClang() {
 
 function tryCompile(clangPath) {
   try {
-    
     execSync(
       `"${clangPath}" --target=wasm32 -nostdlib -O3 -msimd128 -mbulk-memory -Wl,--no-entry -Wl,--export-all -o "${tmpWasm}" "${cSrc}"`,
       { stdio: "pipe" },
     );
-    
+
     if (existsSync(tmpWasm)) {
       if (existsSync(wasmOut)) unlinkSync(wasmOut);
       renameSync(tmpWasm, wasmOut);
@@ -42,10 +41,46 @@ function tryCompile(clangPath) {
     }
     return false;
   } catch (e) {
-    
+    const stderr = (e.stderr?.toString() || "") + (e.message || "");
+    if (/wasm-ld|posix_spawn.*failed/i.test(stderr) && installLld()) {
+      return tryCompile(clangPath);
+    }
     try { if (existsSync(tmpWasm)) unlinkSync(tmpWasm); } catch {}
     return false;
   }
+}
+
+function findWasmLd() {
+  // Check PATH first, then known homebrew locations
+  try { execSync("wasm-ld --version", { stdio: "pipe" }); return true; } catch {}
+  for (const p of ["/usr/local/bin/wasm-ld", "/opt/homebrew/bin/wasm-ld"]) {
+    if (existsSync(p)) return true;
+  }
+  return false;
+}
+
+function installLld() {
+  if (findWasmLd()) return true;
+  console.log("[build:wasm] wasm-ld not found — installing lld...");
+  if (isMac) {
+    try {
+      execSync("brew install lld 2>/dev/null; brew unlink lld 2>/dev/null; brew link lld 2>/dev/null", { stdio: "inherit" });
+      return findWasmLd();
+    } catch {
+      return false;
+    }
+  }
+  if (isLinux) {
+    try {
+      execSync("sudo apt-get update -qq && sudo apt-get install -y -qq lld", {
+        stdio: "inherit",
+      });
+      return findWasmLd();
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function installLlvm() {
