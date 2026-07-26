@@ -61,8 +61,6 @@ const res = await openai.chat.completions.create({
 });
 ```
 
-Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
-
 
 ### Vision
 
