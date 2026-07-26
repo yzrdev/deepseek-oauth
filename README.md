@@ -61,9 +61,6 @@ const res = await openai.chat.completions.create({
 });
 ```
 
-Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
-
-
 ### Vision
 
 Send images as `image_url` content parts. The proxy handles upload automatically:
