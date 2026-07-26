@@ -165,22 +165,34 @@ export function parseToolCalls(
     return call ? [call] : null;
   };
 
-  
-  const pluralMatch = content.match(/<tool_calls>([\s\S]*?)<\/tool_calls>/i);
+  // XML-wrapped: <tool_calls>[...]</tool_calls> or <tool_call>{...}</tool_call>
+  const pluralMatch = content.match(/<tool_calls>\s*([\s\S]*?)\s*<\/tool_calls>/i);
   if (pluralMatch) {
     const result = tryNormalize(parsePayload(pluralMatch[1]));
     if (result) return result;
   }
 
-  
-  const singularMatch = content.match(/<tool_call>([\s\S]*?)<\/tool_call>/i);
+  const singularMatch = content.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i);
   if (singularMatch) {
     const result = tryNormalize(parsePayload(singularMatch[1]));
     if (result) return result;
   }
 
+  // Lenient: <tool_calls> without closing tag (model truncated or malformed)
+  const lenientPlural = content.match(/<tool_calls>\s*([\s\S]+)/i);
+  if (lenientPlural && !pluralMatch) {
+    const result = tryNormalize(parsePayload(lenientPlural[1]));
+    if (result) return result;
+  }
 
-  
+  // Lenient: <tool_call> without closing tag
+  const lenientSingular = content.match(/<tool_call>\s*([\s\S]+)/i);
+  if (lenientSingular && !singularMatch) {
+    const result = tryNormalize(parsePayload(lenientSingular[1]));
+    if (result) return result;
+  }
+
+  // Code-fenced or bare JSON
   const stripped = content
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
