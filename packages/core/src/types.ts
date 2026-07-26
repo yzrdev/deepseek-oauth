@@ -91,8 +91,16 @@ export interface OpenAIChatRequest {
   temperature?: number;
   max_tokens?: number;
   tools?: OpenAIToolDefinition[];
-  tool_choice?: string | { type: "function"; function: { name: string } };
+  tool_choice?: OpenAIToolChoice;
 }
+
+export type OpenAIToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
+export type OpenAIFinishReason = "stop" | "length" | "content_filter" | "tool_calls";
 
 export interface OpenAIChatChunk {
   id: string;
@@ -112,7 +120,7 @@ export interface OpenAIChatChunk {
         function?: { name?: string; arguments?: string };
       }>;
     };
-    finish_reason: string | null;
+    finish_reason: OpenAIFinishReason | null;
   }>;
 }
 

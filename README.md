@@ -125,6 +125,40 @@ const openai = new OpenAI({
 });
 ```
 
+### OpenAI-style tool calling (prompt-based emulation)
+
+`/v1/chat/completions` supports OpenAI `tools`/`tool_choice` by converting tool definitions and prior tool turns into prompt instructions for the DeepSeek web endpoint.
+
+```ts
+const result = await openai.chat.completions.create({
+  model: "deepseek-chat",
+  messages: [{ role: "user", content: "What's the weather in Paris?" }],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "get_weather",
+        description: "Get weather for a city",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+        },
+      },
+    },
+  ],
+  tool_choice: "auto",
+});
+
+const call = result.choices[0].message.tool_calls?.[0];
+// Execute tool client-side, then send a follow-up turn with role: "tool"
+```
+
+Limitations:
+- This is not native DeepSeek function-calling; it is prompt-guided emulation over `chat.deepseek.com`.
+- Structured tool output depends on model compliance, so malformed outputs can fall back to plain text.
+- Never trust tool arguments blindly: validate and sanitize before executing tools.
+
 ## Packages
 
 | Package | Description |

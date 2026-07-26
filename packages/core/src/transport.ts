@@ -1,11 +1,23 @@
 import { encodePowResponse, solvePoW } from "./pow.js";
 import { buildCookieHeader, buildHeaders, createChatSession } from "./session.js";
 import { DeepSeekSSEParser } from "./sse.js";
+import {
+  ToolRequestError,
+  type ToolingConfig,
+  buildToolPrompt,
+  createToolRequestErrorResponse,
+  extractContent,
+  flattenMessages,
+  hasToolConversation,
+  parseToolCallsFromContent,
+  validateToolingConfig,
+} from "./tool-calling.js";
 import type {
   DeepSeekCredentials,
   DeepSeekSession,
   OpenAIChatChunk,
   OpenAIChatRequest,
+  OpenAIFinishReason,
   OpenAIMessage,
   PoWChallenge,
 } from "./types.js";
@@ -30,57 +42,6 @@ const MODEL_MAP: Record<string, ModelConfig> = {
 
 function resolveModel(model: string): ModelConfig {
   return MODEL_MAP[model] ?? MODEL_MAP["deepseek-chat"];
-}
-
-function extractContent(content: string | { type: string; text?: string }[] | null): string {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  return content
-    .filter((p) => p.type === "text")
-    .map((p) => p.text ?? "")
-    .join("\n");
-}
-
-function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
-  const cleaned: OpenAIMessage[] = [];
-  for (const m of messages) {
-    if (m.role === "tool") continue;
-    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      if (!m.content) continue;
-      const { tool_calls: _, ...rest } = m;
-      cleaned.push(rest as OpenAIMessage);
-      continue;
-    }
-    const { tool_calls: _, ...rest } = m;
-    cleaned.push(rest as OpenAIMessage);
-  }
-  const deduped: OpenAIMessage[] = [];
-  for (const m of cleaned) {
-    if (deduped.length > 0 && deduped[deduped.length - 1].role === m.role) {
-      const prev = deduped[deduped.length - 1];
-      const prevText = extractContent(prev.content);
-      const curText = extractContent(m.content);
-      if (curText) {
-        prev.content = prevText ? `${prevText}\n\n${curText}` : curText;
-      }
-    } else {
-      deduped.push(m);
-    }
-  }
-  return deduped;
-}
-
-function flattenMessages(messages: OpenAIMessage[]): string {
-  const cleaned = cleanMessages(messages);
-  return cleaned
-    .map((m) => {
-      const text = extractContent(m.content);
-      if (m.role === "system") return text;
-      if (m.role === "user") return `User: ${text}`;
-      if (m.role === "assistant") return `Assistant: ${text}`;
-      return text;
-    })
-    .join("\n\n");
 }
 
 function lastUserMessage(messages: OpenAIMessage[]): string {
@@ -108,11 +69,15 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
-        const raw = body as unknown as Record<string, unknown>;
-        raw.tools = undefined;
-        raw.tool_choice = undefined;
         const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
-        return handleChatCompletions(body, credentials, existingSessionId, messageIds);
+        try {
+          return await handleChatCompletions(body, credentials, existingSessionId, messageIds);
+        } catch (error) {
+          if (error instanceof ToolRequestError) {
+            return createToolRequestErrorResponse(error);
+          }
+          throw error;
+        }
       }
 
       return new Response("Not Found", { status: 404 });
@@ -140,6 +105,7 @@ async function handleChatCompletions(
   existingSessionId?: string | null,
   messageIds?: Map<string, number>,
 ): Promise<Response> {
+  const tooling = validateToolingConfig(body.tools, body.tool_choice);
   const session = await credentials.getSession();
   const config = resolveModel(body.model);
 
@@ -175,8 +141,11 @@ async function handleChatCompletions(
     }
   }
 
+  const requiresFullPrompt = tooling !== null || hasToolConversation(textMessages);
   let prompt: string;
-  if (isReuse) {
+  if (tooling) {
+    prompt = buildToolPrompt(textMessages, tooling);
+  } else if (isReuse && !requiresFullPrompt) {
     prompt = `User: ${lastUserMessage(textMessages)}`;
   } else {
     prompt = flattenMessages(textMessages);
@@ -237,7 +206,13 @@ async function handleChatCompletions(
 
   let result: Response;
   if (isStream) {
-    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds);
+    result = await handleStreamingResponse(
+      response,
+      body.model,
+      chatSessionId,
+      messageIds,
+      tooling,
+    );
   } else {
     result = await handleNonStreamingResponse(
       response,
@@ -245,6 +220,7 @@ async function handleChatCompletions(
       chatSessionId,
       messageIds,
       prompt,
+      tooling,
     );
   }
 
@@ -411,7 +387,17 @@ async function handleStreamingResponse(
   model: string,
   chatSessionId: string,
   messageIds?: Map<string, number>,
+  tooling?: ToolingConfig | null,
 ): Promise<Response> {
+  if (tooling?.parseOutput) {
+    return handleBufferedToolStreamingResponse(
+      deepseekResponse,
+      model,
+      chatSessionId,
+      messageIds,
+      tooling,
+    );
+  }
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
   }
@@ -560,14 +546,70 @@ async function handleNonStreamingResponse(
   chatSessionId: string,
   messageIds?: Map<string, number>,
   prompt = "",
+  tooling?: ToolingConfig | null,
 ): Promise<Response> {
+  const { fullContent, fullReasoning } = await readDeepSeekTextResponse(
+    deepseekResponse,
+    chatSessionId,
+    messageIds,
+  );
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const parsedToolCalls =
+    tooling?.parseOutput && tooling.toolNames.size > 0
+      ? parseToolCallsFromContent(fullContent, tooling.toolNames)
+      : null;
+
+  const message: Record<string, unknown> = parsedToolCalls
+    ? {
+        role: "assistant",
+        content: null,
+        tool_calls: parsedToolCalls,
+      }
+    : {
+        role: "assistant",
+        content: fullContent,
+      };
+  if (fullReasoning && !parsedToolCalls) {
+    message.reasoning_content = fullReasoning;
+  }
+
+  const finishReason: OpenAIFinishReason = parsedToolCalls ? "tool_calls" : "stop";
+
+  const responseBody = {
+    id,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: finishReason,
+      },
+    ],
+    usage: {
+      prompt_tokens: Math.ceil(prompt.length / 3),
+      completion_tokens: Math.ceil(fullContent.length / 3),
+      total_tokens: Math.ceil((prompt.length + fullContent.length) / 3),
+    },
+  };
+
+  return new Response(JSON.stringify(responseBody), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function readDeepSeekTextResponse(
+  deepseekResponse: Response,
+  chatSessionId: string,
+  messageIds?: Map<string, number>,
+): Promise<{ fullContent: string; fullReasoning: string }> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
   }
   const reader = deepseekResponse.body.getReader();
   const decoder = new TextDecoder();
-  const id = `chatcmpl-${Date.now()}`;
-  const created = Math.floor(Date.now() / 1000);
 
   let fullContent = "";
   let fullReasoning = "";
@@ -586,35 +628,99 @@ async function handleNonStreamingResponse(
     parser.feed(decoder.decode(value, { stream: true }));
   }
   parser.flush();
+  return { fullContent, fullReasoning };
+}
 
-  const message: Record<string, unknown> = {
-    role: "assistant",
-    content: fullContent,
-  };
-  if (fullReasoning) {
-    message.reasoning_content = fullReasoning;
-  }
+async function handleBufferedToolStreamingResponse(
+  deepseekResponse: Response,
+  model: string,
+  chatSessionId: string,
+  messageIds: Map<string, number> | undefined,
+  tooling: ToolingConfig,
+): Promise<Response> {
+  const { fullContent, fullReasoning } = await readDeepSeekTextResponse(
+    deepseekResponse,
+    chatSessionId,
+    messageIds,
+  );
 
-  const responseBody = {
-    id,
-    object: "chat.completion",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        message,
-        finish_reason: "stop",
-      },
-    ],
-    usage: {
-      prompt_tokens: Math.ceil(prompt.length / 3),
-      completion_tokens: Math.ceil(fullContent.length / 3),
-      total_tokens: Math.ceil((prompt.length + fullContent.length) / 3),
+  const parsedToolCalls = parseToolCallsFromContent(fullContent, tooling.toolNames);
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const roleChunk: OpenAIChatChunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+      };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(roleChunk)}\n\n`));
+
+      if (parsedToolCalls) {
+        for (const [index, call] of parsedToolCalls.entries()) {
+          const chunk: OpenAIChatChunk = {
+            id,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index,
+                      id: call.id,
+                      type: "function",
+                      function: {
+                        name: call.function.name,
+                        arguments: call.function.arguments,
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        }
+      } else if (fullContent || fullReasoning) {
+        const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
+        if (fullContent) delta.content = fullContent;
+        if (fullReasoning) delta.reasoning_content = fullReasoning;
+        const textChunk: OpenAIChatChunk = {
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [{ index: 0, delta, finish_reason: null }],
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(textChunk)}\n\n`));
+      }
+
+      const final: OpenAIChatChunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: parsedToolCalls ? "tool_calls" : "stop" }],
+      };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(final)}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
     },
-  };
+  });
 
-  return new Response(JSON.stringify(responseBody), {
-    headers: { "content-type": "application/json" },
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
   });
 }
