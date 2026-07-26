@@ -1,8 +1,9 @@
 const { execSync } = require("node:child_process");
-const { existsSync, statSync } = require("node:fs");
+const { existsSync, statSync, renameSync, unlinkSync } = require("node:fs");
 const { join } = require("node:path");
 
 const wasmOut = join(__dirname, "..", "packages", "core", "solver.wasm");
+const tmpWasm = wasmOut + ".tmp";
 const cSrc = join(__dirname, "..", "packages", "core", "solver.c");
 
 const isWindows = process.platform === "win32";
@@ -28,12 +29,21 @@ function findClang() {
 
 function tryCompile(clangPath) {
   try {
+    // 1. Compile to a temporary file
     execSync(
-      `"${clangPath}" --target=wasm32 -nostdlib -O3 -Wl,--no-entry -Wl,--export-all -o "${wasmOut}" "${cSrc}"`,
+      `"${clangPath}" --target=wasm32 -nostdlib -O3 -Wl,--no-entry -Wl,--export-all -o "${tmpWasm}" "${cSrc}"`,
       { stdio: "pipe" },
     );
-    return true;
+    // 2. On success, replace the old solver.wasm
+    if (existsSync(tmpWasm)) {
+      if (existsSync(wasmOut)) unlinkSync(wasmOut);
+      renameSync(tmpWasm, wasmOut);
+      return true;
+    }
+    return false;
   } catch (e) {
+    // 3. On failure, clean up any leftover temporary file
+    try { if (existsSync(tmpWasm)) unlinkSync(tmpWasm); } catch {}
     return false;
   }
 }

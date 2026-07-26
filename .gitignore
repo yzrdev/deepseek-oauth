@@ -4,3 +4,4 @@ dist/
 *.tsbuildinfo
 .deepseek-oauth/
 session/
+.DS_Store

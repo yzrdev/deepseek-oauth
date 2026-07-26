@@ -45,23 +45,19 @@ export function flattenMessages(messages: OpenAIMessage[]): string {
     if (message.role === "assistant") {
       if (content) transcript.push(`Assistant:\n${content}`);
       if (message.tool_calls?.length) {
-        for (const call of message.tool_calls) toolNames.set(call.id, call.function.name);
-        transcript.push(
-          `Assistant tool calls:\n${JSON.stringify(
-            message.tool_calls.map((call) => ({
-              id: call.id,
-              name: call.function.name,
-              arguments: parseArgumentsForPrompt(call.function.arguments),
-            })),
-          )}`,
-        );
+        for (const call of message.tool_calls) {
+          toolNames.set(call.id, call.function.name);
+          transcript.push(
+            `Assistant tool call (id=${call.id}): ${call.function.name}(${call.function.arguments})`,
+          );
+        }
       }
       continue;
     }
 
     const toolName = message.name ?? toolNames.get(message.tool_call_id ?? "") ?? "unknown";
     transcript.push(
-      `Tool result (${toolName}, call id ${message.tool_call_id ?? "unknown"}):\n${content}`,
+      `Tool result (tool_call_id=${message.tool_call_id ?? "unknown"}):\n${content}`,
     );
   }
 
@@ -86,7 +82,7 @@ export function buildToolPrompt(
 
   const protocol = [
     "Tool-use protocol (highest priority for this request):",
-    `Available tools (names, descriptions, and JSON Schemas):\n${JSON.stringify(definitions)}`,
+    `Available tools:\n${JSON.stringify(definitions)}`,
     choiceInstruction,
     "To call one or more tools, output only this tag containing a JSON array:",
     `<${TOOL_CALLS_TAG}>[{"name":"exact_tool_name","arguments":{"schema_field":"value"}}]</${TOOL_CALLS_TAG}>`,
@@ -97,58 +93,6 @@ export function buildToolPrompt(
   return transcript ? `${transcript}\n\n${protocol}` : protocol;
 }
 
-export function parseToolCalls(
-  content: string,
-  tools: OpenAIToolDefinition[],
-): OpenAIToolCall[] | null {
-  const payloads: string[] = [];
-  const pluralPattern = new RegExp(
-    `<${TOOL_CALLS_TAG}>\\s*([\\s\\S]*?)\\s*</${TOOL_CALLS_TAG}>`,
-    "gi",
-  );
-  for (const match of content.matchAll(pluralPattern)) {
-    if (match[1]) payloads.push(match[1]);
-  }
-
-  if (payloads.length === 0) {
-    const singularPattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
-    for (const match of content.matchAll(singularPattern)) {
-      if (match[1]) payloads.push(match[1]);
-    }
-  }
-
-  if (payloads.length === 0) {
-    const labeledPattern = /(?:^|\n)\s*(?:tool|function)\s*calls?\s*:\s*/gi;
-    for (const match of content.matchAll(labeledPattern)) {
-      const payload = extractFirstJsonValue(content.slice((match.index ?? 0) + match[0].length));
-      if (payload) payloads.push(payload);
-    }
-  }
-
-  if (payloads.length === 0) return null;
-
-  const allowedNames = new Map(
-    tools.map((tool) => [tool.function.name.toLowerCase(), tool.function.name]),
-  );
-  const calls: OpenAIToolCall[] = [];
-
-  for (const payload of payloads) {
-    const parsed = parsePayload(payload);
-    if (parsed == null) continue;
-    const candidates = Array.isArray(parsed)
-      ? parsed
-      : isRecord(parsed) && Array.isArray(parsed.tool_calls)
-        ? parsed.tool_calls
-        : [parsed];
-
-    for (const candidate of candidates) {
-      const normalized = normalizeCall(candidate, allowedNames);
-      if (normalized) calls.push(normalized);
-    }
-  }
-
-  return calls.length > 0 ? calls : null;
-}
 
 function parseArgumentsForPrompt(argumentsJson: string): unknown {
   try {
@@ -158,63 +102,133 @@ function parseArgumentsForPrompt(argumentsJson: string): unknown {
   }
 }
 
-function parsePayload(payload: string): unknown {
-  const trimmed = payload
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "");
+function extractFirstJsonValue(text: string): string | null {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{" || text[i] === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (text[i] === "}" || text[i] === "]") {
+      depth--;
+      if (depth === 0 && start >= 0) return text.slice(start, i + 1);
+      if (depth < 0) depth = 0;
+    }
+  }
+  return null;
+}
+
+function parsePayload(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
   try {
     return JSON.parse(trimmed);
   } catch {
-    return null;
+    const json = extractFirstJsonValue(trimmed);
+    if (!json) return null;
+    try {
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
   }
 }
 
-function extractFirstJsonValue(input: string): string | null {
-  const arrayStart = input.indexOf("[");
-  const objectStart = input.indexOf("{");
-  const start =
-    arrayStart === -1
-      ? objectStart
-      : objectStart === -1
-        ? arrayStart
-        : Math.min(arrayStart, objectStart);
-  if (start === -1) return null;
+export function parseToolCalls(
+  content: string,
+  tools: OpenAIToolDefinition[],
+): OpenAIToolCall[] | null {
+  if (!content.trim()) return null;
 
-  const stack: string[] = [];
-  let inString = false;
-  let escaped = false;
+  const allowedNames = new Map(
+    tools.map((tool) => [tool.function.name.toLowerCase(), tool.function.name]),
+  );
 
-  for (let index = start; index < input.length; index++) {
-    const character = input[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (character === '"') {
-        inString = false;
-      }
-      continue;
+  const tryNormalize = (
+    payload: unknown,
+  ): OpenAIToolCall[] | null => {
+    if (!payload) return null;
+    // Unwrap {"tool_calls": [...]} wrapper
+    if (isRecord(payload) && Array.isArray(payload.tool_calls)) {
+      const calls = (payload.tool_calls as unknown[])
+        .map((c) => normalizeCall(c, allowedNames))
+        .filter((c): c is OpenAIToolCall => c !== null);
+      return calls.length > 0 ? calls : null;
     }
-
-    if (character === '"') {
-      inString = true;
-    } else if (character === "[" || character === "{") {
-      stack.push(character);
-    } else if (character === "]" || character === "}") {
-      const opener = stack.pop();
-      if ((character === "]" && opener !== "[") || (character === "}" && opener !== "{")) {
-        return null;
-      }
-      if (stack.length === 0) return input.slice(start, index + 1);
+    if (Array.isArray(payload)) {
+      const calls = payload
+        .map((c) => normalizeCall(c, allowedNames))
+        .filter((c): c is OpenAIToolCall => c !== null);
+      return calls.length > 0 ? calls : null;
     }
+    const call = normalizeCall(payload, allowedNames);
+    return call ? [call] : null;
+  };
+
+  // XML plural: <tool_calls>[...]</tool_calls>
+  const pluralMatch = content.match(/<tool_calls>([\s\S]*?)<\/tool_calls>/i);
+  if (pluralMatch) {
+    const result = tryNormalize(parsePayload(pluralMatch[1]));
+    if (result) return result;
+  }
+
+  // XML singular: <tool_call>{...}</tool_call>
+  const singularMatch = content.match(/<tool_call>([\s\S]*?)<\/tool_call>/i);
+  if (singularMatch) {
+    const result = tryNormalize(parsePayload(singularMatch[1]));
+    if (result) return result;
+  }
+
+  // Labeled JSON: "tool calls:", "function call:", etc.
+  const labeledMatch = content.match(
+    /(?:tool\s*calls?|function\s*calls?)\s*[:\n]\s*(\{[\s\S]*?\}|\[[\s\S]*?\])/i,
+  );
+  if (labeledMatch) {
+    const result = tryNormalize(parsePayload(labeledMatch[1]));
+    if (result) return result;
+  }
+
+  // Narrative format: "Assistant tool call (id=...): Name({...})"
+  const narrativeRe = /Assistant tool call\s*\(id=["']?[^)"]*["']?\):\s*(\w+)\(/gi;
+  const narrativeCalls: OpenAIToolCall[] = [];
+  let nm: RegExpExecArray | null;
+  while ((nm = narrativeRe.exec(content)) !== null) {
+    const funcName = nm[1];
+    const argsStart = nm.index + nm[0].length;
+    let depth = 0;
+    let argsEnd = argsStart;
+    for (let i = argsStart; i < content.length; i++) {
+      if (content[i] === "{") depth++;
+      else if (content[i] === "}") {
+        depth--;
+        if (depth === 0) { argsEnd = i + 1; break; }
+      }
+    }
+    const argsJson = content.slice(argsStart, argsEnd);
+    const args = parsePayload(argsJson);
+    if (args && funcName) {
+      const call = normalizeCall({ name: funcName, arguments: args }, allowedNames);
+      if (call) narrativeCalls.push(call);
+    }
+  }
+  if (narrativeCalls.length > 0) return narrativeCalls;
+
+  // Bare JSON: model may output raw JSON without any wrapper
+  const stripped = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
+  if (stripped.startsWith("[") || stripped.startsWith("{")) {
+    const result = tryNormalize(parsePayload(stripped));
+    if (result) return result;
   }
 
   return null;
 }
 
-function normalizeCall(
+
+
+export function normalizeCall(
   candidate: unknown,
   allowedNames: Map<string, string>,
 ): OpenAIToolCall | null {

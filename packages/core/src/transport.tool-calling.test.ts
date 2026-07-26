@@ -17,6 +17,19 @@ const TOOL: OpenAIToolDefinition = {
   },
 };
 
+const READ_TOOL: OpenAIToolDefinition = {
+  type: "function",
+  function: {
+    name: "Read",
+    description: "Read a file",
+    parameters: {
+      type: "object",
+      properties: { file_path: { type: "string" } },
+      required: ["file_path"],
+    },
+  },
+};
+
 function createSolvableChallenge() {
   const salt = "salt";
   const expire_at = Date.now() + 60_000;
@@ -56,7 +69,11 @@ function sseResponse(content: string): Response {
 function makeTransportWithMock(options: {
   completionContent: string;
   capturePrompt?: (prompt: string) => void;
-}): ReturnType<typeof createDeepSeekTransport> {
+  extractionContent?: string;
+}): { transport: ReturnType<typeof createDeepSeekTransport>; apiCalls: () => number } {
+  let apiCallCount = 0;
+  let completionCallIndex = 0;
+
   const credentials: DeepSeekCredentials = {
     async getSession() {
       return {
@@ -69,6 +86,7 @@ function makeTransportWithMock(options: {
   };
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    apiCallCount++;
     const url = String(input);
     if (url.endsWith("/api/v0/chat/create_pow_challenge")) {
       return jsonResponse({
@@ -80,6 +98,10 @@ function makeTransportWithMock(options: {
       return jsonResponse({ code: 0, data: { biz_data: { chat_session: { id: "session-1" } } } });
     }
     if (url.endsWith("/api/v0/chat/completion")) {
+      completionCallIndex++;
+      if (completionCallIndex === 2) {
+        return sseResponse(options.extractionContent ?? '{"tool_calls":[]}');
+      }
       const bodyText = typeof init?.body === "string" ? init.body : "";
       const payload = JSON.parse(bodyText) as { prompt: string };
       options.capturePrompt?.(payload.prompt);
@@ -88,7 +110,10 @@ function makeTransportWithMock(options: {
     throw new Error(`Unexpected fetch url: ${url}`);
   }) as typeof fetch;
 
-  return createDeepSeekTransport(credentials);
+  return {
+    transport: createDeepSeekTransport(credentials),
+    apiCalls: () => apiCallCount,
+  };
 }
 
 async function requestCompletion(
@@ -106,7 +131,7 @@ async function requestCompletion(
 }
 
 test("invalid named tool choice returns OpenAI-style 400", { concurrency: false }, async () => {
-  const transport = makeTransportWithMock({ completionContent: "unused" });
+  const { transport } = makeTransportWithMock({ completionContent: "unused" });
   const response = await requestCompletion(transport, {
     model: "deepseek-chat",
     stream: false,
@@ -124,7 +149,7 @@ test(
   "non-streaming returns tool_calls and finish_reason tool_calls",
   { concurrency: false },
   async () => {
-    const transport = makeTransportWithMock({
+    const { transport, apiCalls } = makeTransportWithMock({
       completionContent:
         '<tool_calls>{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris"}}]}</tool_calls>',
     });
@@ -143,6 +168,7 @@ test(
     assert.equal(data.choices[0].finish_reason, "tool_calls");
     assert.equal(data.choices[0].message.content, null);
     assert.equal(data.choices[0].message.tool_calls?.[0].function.name, "get_weather");
+    assert.equal(apiCalls(), 3); // session create, PoW, completion — no extraction
   },
 );
 
@@ -150,7 +176,7 @@ test(
   "streaming emits delta.tool_calls and final tool_calls finish reason",
   { concurrency: false },
   async () => {
-    const transport = makeTransportWithMock({
+    const { transport, apiCalls } = makeTransportWithMock({
       completionContent:
         '<tool_calls>{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris"}}]}</tool_calls>',
     });
@@ -175,6 +201,7 @@ test(
 
     assert.ok(payloads.some((chunk) => Array.isArray(chunk.choices[0].delta.tool_calls)));
     assert.equal(payloads[payloads.length - 1].choices[0].finish_reason, "tool_calls");
+    assert.equal(apiCalls(), 3); // session create, PoW, completion — no extraction
   },
 );
 
@@ -183,7 +210,7 @@ test(
   { concurrency: false },
   async () => {
     let capturedPrompt = "";
-    const transport = makeTransportWithMock({
+    const { transport, apiCalls } = makeTransportWithMock({
       completionContent: "normal text",
       capturePrompt: (prompt) => {
         capturedPrompt = prompt;
@@ -218,6 +245,7 @@ test(
     assert.match(capturedPrompt, /Assistant tool call \(id=call_123\)/);
     assert.match(capturedPrompt, /Tool result \(tool_call_id=call_123\)/);
     assert.match(capturedPrompt, /Available tools:/);
+    assert.equal(apiCalls(), 4); // session create, PoW, primary completion, extraction completion
   },
 );
 
@@ -226,7 +254,7 @@ test(
   { concurrency: false },
   async () => {
     let capturedPrompt = "";
-    const transport = makeTransportWithMock({
+    const { transport, apiCalls } = makeTransportWithMock({
       completionContent: "Hello back!",
       capturePrompt: (prompt) => {
         capturedPrompt = prompt;
@@ -252,5 +280,34 @@ test(
     assert.equal(capturedPrompt, "User: Latest only?");
     assert.equal(data.choices[0].finish_reason, "stop");
     assert.equal(data.choices[0].message.content, "Hello back!");
+    assert.equal(apiCalls(), 2); // PoW, completion — session reused, no extraction
+  },
+);
+
+test(
+  "LLM extraction handles non-XML tool call format",
+  { concurrency: false },
+  async () => {
+    const { transport, apiCalls } = makeTransportWithMock({
+      completionContent: "Let me check.\n\n[Read file: /src/main.ts]",
+      extractionContent:
+        '{"tool_calls":[{"name":"Read","arguments":{"file_path":"/src/main.ts"}}]}',
+    });
+    const response = await requestCompletion(transport, {
+      model: "deepseek-chat",
+      stream: false,
+      messages: [{ role: "user", content: "Read main.ts" }],
+      tools: [READ_TOOL],
+    });
+    const data = (await response.json()) as {
+      choices: Array<{
+        finish_reason: string;
+        message: { content: string | null; tool_calls?: Array<{ function: { name: string } }> };
+      }>;
+    };
+    assert.equal(data.choices[0].finish_reason, "tool_calls");
+    assert.equal(data.choices[0].message.content, null);
+    assert.equal(data.choices[0].message.tool_calls?.[0].function.name, "Read");
+    assert.equal(apiCalls(), 4); // session create, PoW, primary completion, extraction completion
   },
 );
