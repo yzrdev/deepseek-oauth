@@ -39,10 +39,10 @@ Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatica
 
 | Model | Capabilities |
 |-------|-------------|
-| `deepseek-chat` | Chat, streaming |
+| `deepseek-chat` | Chat, streaming, tool calling |
 | `deepseek-instant` | Same as `deepseek-chat` |
 | `deepseek-v3` | Same as `deepseek-chat` |
-| `deepseek-reasoner` | Chat, streaming, DeepThink reasoning |
+| `deepseek-reasoner` | Chat, streaming, tool calling, DeepThink reasoning |
 | `deepseek-expert` | Same as `deepseek-reasoner` |
 | `deepseek-r1` | Same as `deepseek-reasoner` |
 | `deepseek-vision` | Chat, streaming, image understanding |
@@ -63,6 +63,10 @@ const res = await openai.chat.completions.create({
 ```
 
 Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
+
+### Tool calling
+
+The chat completions endpoint supports OpenAI-compatible `tools` and `tool_choice` in streaming and non-streaming requests. Send tool results in the next request to continue the conversation.
 
 ### Vision
 
@@ -124,6 +128,40 @@ const openai = new OpenAI({
   fetch: transport.fetch,
 });
 ```
+
+### OpenAI-style tool calling (prompt-based emulation)
+
+`/v1/chat/completions` supports OpenAI `tools`/`tool_choice` by converting tool definitions and prior tool turns into prompt instructions for the DeepSeek web endpoint.
+
+```ts
+const result = await openai.chat.completions.create({
+  model: "deepseek-chat",
+  messages: [{ role: "user", content: "What's the weather in Paris?" }],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "get_weather",
+        description: "Get weather for a city",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+        },
+      },
+    },
+  ],
+  tool_choice: "auto",
+});
+
+const call = result.choices[0].message.tool_calls?.[0];
+// Execute tool client-side, then send a follow-up turn with role: "tool"
+```
+
+Limitations:
+- This is not native DeepSeek function-calling; it is prompt-guided emulation over `chat.deepseek.com`.
+- Structured tool output depends on model compliance, so malformed outputs can fall back to plain text.
+- Never trust tool arguments blindly: validate and sanitize before executing tools.
 
 ## Packages
 

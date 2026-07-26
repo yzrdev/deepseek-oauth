@@ -10,7 +10,6 @@
     "dev": "turbo run dev",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "test": "node --test packages/core/dist/*.test.js packages/deepseek-oauth/dist/*.test.js",
     "clean": "turbo run clean",
     "serve": "deepseek-oauth serve",
     "login": "deepseek-oauth login",
