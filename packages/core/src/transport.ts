@@ -62,6 +62,7 @@ function lastUserMessage(messages: OpenAIMessage[]): string {
 
 export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
   const messageIds = new Map<string, number>();
+  const sessionModels = new Map<string, string>();
 
   return {
     baseURL: "https://deepseek-oauth.local/v1",
@@ -76,8 +77,24 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
-        const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
-        return handleChatCompletions(body, credentials, existingSessionId, messageIds);
+        let existingSessionId = request.headers.get("x-deepseek-chat-session-id");
+
+        if (existingSessionId) {
+          const sessionModel = sessionModels.get(existingSessionId);
+          if (sessionModel && sessionModel !== body.model) {
+            messageIds.delete(existingSessionId);
+            existingSessionId = null;
+          }
+        }
+
+        const response = await handleChatCompletions(body, credentials, existingSessionId, messageIds);
+
+        const responseSessionId = response.headers.get("x-deepseek-chat-session-id");
+        if (responseSessionId) {
+          sessionModels.set(responseSessionId, body.model);
+        }
+
+        return response;
       }
 
       return new Response("Not Found", { status: 404 });
