@@ -144,8 +144,8 @@ async function handleChatCompletions(
 
   const isStream = body.stream !== false;
 
-  let chatSessionId = needsFullContext ? "" : (existingSessionId ?? "");
-  const isReuse = Boolean(existingSessionId) && !needsFullContext;
+  let chatSessionId = existingSessionId ?? "";
+  const isReuse = Boolean(existingSessionId);
 
   const { images, hasImages } = extractImages(body.messages);
   const refFileIds: string[] = [];
@@ -193,7 +193,7 @@ async function handleChatCompletions(
   const extractionArgs = tools ? { session, chatSessionId, powEncoded } : undefined;
 
   const parentMessageId =
-    isReuse && chatSessionId ? (messageIds?.get(chatSessionId) ?? null) : null;
+    isReuse && chatSessionId && !needsFullContext ? (messageIds?.get(chatSessionId) ?? null) : null;
 
   const maxTokens = body.max_tokens;
 

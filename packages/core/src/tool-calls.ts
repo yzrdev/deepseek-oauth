@@ -179,39 +179,6 @@ export function parseToolCalls(
     if (result) return result;
   }
 
-  // Labeled JSON: "tool calls:", "function call:", etc.
-  const labeledMatch = content.match(
-    /(?:tool\s*calls?|function\s*calls?)\s*[:\n]\s*(\{[\s\S]*?\}|\[[\s\S]*?\])/i,
-  );
-  if (labeledMatch) {
-    const result = tryNormalize(parsePayload(labeledMatch[1]));
-    if (result) return result;
-  }
-
-  // Narrative format: "Assistant tool call (id=...): Name({...})"
-  const narrativeRe = /Assistant tool call\s*\(id=["']?[^)"]*["']?\):\s*(\w+)\(/gi;
-  const narrativeCalls: OpenAIToolCall[] = [];
-  let nm: RegExpExecArray | null;
-  while ((nm = narrativeRe.exec(content)) !== null) {
-    const funcName = nm[1];
-    const argsStart = nm.index + nm[0].length;
-    let depth = 0;
-    let argsEnd = argsStart;
-    for (let i = argsStart; i < content.length; i++) {
-      if (content[i] === "{") depth++;
-      else if (content[i] === "}") {
-        depth--;
-        if (depth === 0) { argsEnd = i + 1; break; }
-      }
-    }
-    const argsJson = content.slice(argsStart, argsEnd);
-    const args = parsePayload(argsJson);
-    if (args && funcName) {
-      const call = normalizeCall({ name: funcName, arguments: args }, allowedNames);
-      if (call) narrativeCalls.push(call);
-    }
-  }
-  if (narrativeCalls.length > 0) return narrativeCalls;
 
   // Bare JSON: model may output raw JSON without any wrapper
   const stripped = content

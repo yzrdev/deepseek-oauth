@@ -245,7 +245,7 @@ test(
     assert.match(capturedPrompt, /Assistant tool call \(id=call_123\)/);
     assert.match(capturedPrompt, /Tool result \(tool_call_id=call_123\)/);
     assert.match(capturedPrompt, /Available tools:/);
-    assert.equal(apiCalls(), 4); // session create, PoW, primary completion, extraction completion
+    assert.equal(apiCalls(), 3); // session reused, PoW, primary completion, extraction completion
   },
 );
 
