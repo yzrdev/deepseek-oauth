@@ -7,30 +7,9 @@ typedef long long int64_t;
 typedef unsigned int size_t;
 #define NULL ((void*)0)
 
-static void* memcpy(void* d, const void* s, size_t n) {
-    unsigned char* dst = (unsigned char*)d;
-    const unsigned char* src = (const unsigned char*)s;
-    size_t i;
-    for (i = 0; i < n; i++) dst[i] = src[i];
-    return d;
-}
-
-static void* memset(void* d, int c, size_t n) {
-    unsigned char* dst = (unsigned char*)d;
-    size_t i;
-    for (i = 0; i < n; i++) dst[i] = (unsigned char)c;
-    return d;
-}
-
-static int memcmp(const void* a, const void* b, size_t n) {
-    const unsigned char* pa = (const unsigned char*)a;
-    const unsigned char* pb = (const unsigned char*)b;
-    size_t i;
-    for (i = 0; i < n; i++) {
-        if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
-    }
-    return 0;
-}
+#define memcpy __builtin_memcpy
+#define memset __builtin_memset
+#define memcmp __builtin_memcmp
 
 #define RATE 136
 

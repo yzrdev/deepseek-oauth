@@ -31,7 +31,7 @@ function tryCompile(clangPath) {
   try {
     
     execSync(
-      `"${clangPath}" --target=wasm32 -nostdlib -O3 -Wl,--no-entry -Wl,--export-all -o "${tmpWasm}" "${cSrc}"`,
+      `"${clangPath}" --target=wasm32 -nostdlib -O3 -msimd128 -mbulk-memory -Wl,--no-entry -Wl,--export-all -o "${tmpWasm}" "${cSrc}"`,
       { stdio: "pipe" },
     );
     
@@ -114,5 +114,5 @@ if (installLlvm()) {
 if (existsSync(wasmOut)) {
   console.log(`[build:wasm] Using pre-built solver.wasm (${statSync(wasmOut).size} bytes)`);
 } else {
-  console.warn("[build:wasm] solver.wasm not found — PoW will fall back to JS solver");
+  console.warn("[build:wasm] solver.wasm not found — PoW will fail. Install clang or check in a pre-built solver.wasm");
 }

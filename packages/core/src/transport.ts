@@ -327,8 +327,8 @@ async function uploadFile(
   const header = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`;
   const footer = `\r\n--${boundary}--`;
 
-  const headerBytes = new TextEncoder().encode(header);
-  const footerBytes = new TextEncoder().encode(footer);
+  const headerBytes = textEncoder.encode(header);
+  const footerBytes = textEncoder.encode(footer);
   const body = new Uint8Array(headerBytes.length + fileBuffer.length + footerBytes.length);
   body.set(headerBytes, 0);
   body.set(fileBuffer, headerBytes.length);
@@ -381,6 +381,8 @@ async function uploadFile(
   }
 }
 
+const _powCache: { challenge: PoWChallenge | null; ts: number } = { challenge: null, ts: 0 };
+
 async function requestPoWChallengeForTarget(
   session: DeepSeekSession,
   targetPath: string,
@@ -412,13 +414,32 @@ async function requestPoWChallengeForTarget(
 }
 
 async function requestPoWChallenge(session: DeepSeekSession): Promise<PoWChallenge> {
-  return requestPoWChallengeForTarget(session, "/api/v0/chat/completion");
+  if (_powCache.challenge && Date.now() - _powCache.ts < 1000) return _powCache.challenge;
+  const challenge = await requestPoWChallengeForTarget(session, "/api/v0/chat/completion");
+  _powCache.challenge = challenge;
+  _powCache.ts = Date.now();
+  return challenge;
 }
 
 const DEBUG = !!process.env.DEBUG_DEEPSEEK;
 
 function debug(...args: unknown[]) {
   if (DEBUG) console.error("[deepseek-oauth]", ...args);
+}
+
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+const DATA_HEADER = textEncoder.encode("data: ");
+const DATA_FOOTER = textEncoder.encode("\n\n");
+const DATA_DONE = textEncoder.encode("data: [DONE]\n\n");
+
+function encodeSSE(chunk: unknown): Uint8Array {
+  const json = textEncoder.encode(JSON.stringify(chunk));
+  const out = new Uint8Array(DATA_HEADER.length + json.length + DATA_FOOTER.length);
+  out.set(DATA_HEADER, 0);
+  out.set(json, DATA_HEADER.length);
+  out.set(DATA_FOOTER, DATA_HEADER.length + json.length);
+  return out;
 }
 
 async function handleStreamingResponse(
@@ -431,8 +452,8 @@ async function handleStreamingResponse(
     throw new Error("No response body from DeepSeek");
   }
   const reader = deepseekResponse.body.getReader();
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
+  const decoder = textDecoder;
+  const encoder = textEncoder;
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -461,7 +482,7 @@ async function handleStreamingResponse(
             model,
             choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          controller.enqueue(encodeSSE(chunk));
         }
         const final: OpenAIChatChunk = {
           id,
@@ -470,8 +491,8 @@ async function handleStreamingResponse(
           model,
           choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(final)}\n\n`));
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.enqueue(encodeSSE(final));
+        controller.enqueue(DATA_DONE);
         controller.close();
       };
 
@@ -489,7 +510,7 @@ async function handleStreamingResponse(
             model,
             choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          controller.enqueue(encodeSSE(chunk));
         }
 
         contentBuffer += content;
@@ -499,8 +520,8 @@ async function handleStreamingResponse(
         const shouldFlush =
           done ||
           (hasPending &&
-            (contentBuffer.length > 20 ||
-              reasoningBuffer.length > 20 ||
+            (contentBuffer.length > 80 ||
+              reasoningBuffer.length > 80 ||
               Date.now() - lastFlushTime > 50));
         if (shouldFlush) {
           if (hasPending) {
@@ -514,7 +535,7 @@ async function handleStreamingResponse(
               model,
               choices: [{ index: 0, delta, finish_reason: null }],
             };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            controller.enqueue(encodeSSE(chunk));
             contentBuffer = "";
             reasoningBuffer = "";
             lastFlushTime = Date.now();
@@ -540,16 +561,12 @@ async function handleStreamingResponse(
       } catch (e) {
         debug("stream error:", e, "id:", id);
         if (!streamClosed) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                error: {
-                  message: e instanceof Error ? e.message : "Stream error",
-                  type: "server_error",
-                },
-              })}\n\n`,
-            ),
-          );
+          controller.enqueue(encodeSSE({
+            error: {
+              message: e instanceof Error ? e.message : "Stream error",
+              type: "server_error",
+            },
+          }));
         }
       }
 
@@ -583,15 +600,15 @@ async function handleToolStreamingResponse(
   }
 
   const reader = deepseekResponse.body.getReader();
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
+  const decoder = textDecoder;
+  const encoder = textEncoder;
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
 
   const stream = new ReadableStream({
     async start(controller) {
       const enqueue = (chunk: OpenAIChatChunk) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        controller.enqueue(encodeSSE(chunk));
       };
       enqueue({
         id,
@@ -617,17 +634,13 @@ async function handleToolStreamingResponse(
         }
         parser.flush();
       } catch (error) {
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              error: {
-                message: error instanceof Error ? error.message : "Stream error",
-                type: "server_error",
-              },
-            })}\n\n`,
-          ),
-        );
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.enqueue(encodeSSE({
+          error: {
+            message: error instanceof Error ? error.message : "Stream error",
+            type: "server_error",
+          },
+        }));
+        controller.enqueue(DATA_DONE);
         controller.close();
         return;
       }
@@ -670,7 +683,7 @@ async function handleToolStreamingResponse(
         model,
         choices: [{ index: 0, delta: {}, finish_reason: toolCalls ? "tool_calls" : "stop" }],
       });
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.enqueue(DATA_DONE);
       controller.close();
     },
   });
@@ -698,7 +711,7 @@ async function handleNonStreamingResponse(
     throw new Error("No response body from DeepSeek");
   }
   const reader = deepseekResponse.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = textDecoder;
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -764,7 +777,7 @@ async function handleNonStreamingResponse(
 }
 
 const TOOL_EXTRACTION_TIMEOUT_MS = parseInt(
-  process.env.DEEPSEEK_TOOL_EXTRACTION_TIMEOUT_MS ?? "10000",
+  process.env.DEEPSEEK_TOOL_EXTRACTION_TIMEOUT_MS ?? "5000",
   10,
 );
 
@@ -778,37 +791,15 @@ async function llmExtractToolCalls(
 ): Promise<OpenAIToolCall[] | null> {
   if (!content.trim()) return null;
 
-  const MAX_DESC_LENGTH = 200;
-  const toolSummaries = tools.map((t) => ({
-    name: t.function.name,
-    parameters: t.function.parameters,
-    ...(t.function.description
-      ? { description: t.function.description.slice(0, MAX_DESC_LENGTH) }
-      : {}),
-  }));
+  const head = content.slice(0, 200);
+  if (!/[\[\{<`]/.test(head)) return null;
 
-  const extractionPrompt = [
-    "You are a tool-call parser. Extract any tool invocations from the assistant response below.",
-    "The response may use XML tags, markdown, JSON, YAML, or plain prose — extract tool calls regardless of format.",
-    "Return ONLY a JSON object with a \"tool_calls\" array. No markdown, no explanation.",
-    "",
-    "Available tools:",
-    JSON.stringify(toolSummaries),
-    "",
-    "Assistant response:",
-    '"""',
-    content,
-    '"""',
-    "",
-    'Output: {"tool_calls":[{"name":"tool_name","arguments":{...}}]} or {"tool_calls":[]}',
-  ].join("\n");
+  const extractionPrompt = `Extract tool calls from this assistant response. Return ONLY {"tool_calls":[...]} with "name" and "arguments" keys. If no tools are invoked, return {"tool_calls":[]}.\n\nResponse:\n"""\n${content}\n"""`;
 
   const extractionBody = {
     chat_session_id: chatSessionId,
     prompt: extractionPrompt,
-    thinking_enabled: false,
-    search_enabled: false,
-    max_tokens: 1000,
+    max_tokens: 300,
     model_type: "default",
     action: null,
     preempt: false,
@@ -833,7 +824,7 @@ async function llmExtractToolCalls(
     if (!response.ok || !response.body) return null;
 
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = textDecoder;
     let fullContent = "";
 
     const parser = new DeepSeekSSEParser((ct, _reasoning, _done, _msgId) => {
