@@ -139,7 +139,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
       try {
         await options.onShutdown();
       } catch {
-        // ignore
+        
       }
     }
 

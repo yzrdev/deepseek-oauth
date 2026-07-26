@@ -64,7 +64,7 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
   const messageIds = new Map<string, number>();
 
   return {
-    baseURL: "https://deepseek-oauth.local/v1",
+    baseURL: "https:
     async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
       const request = new Request(input, init);
       const url = new URL(request.url);

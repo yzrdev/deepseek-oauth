@@ -29,12 +29,12 @@ function findClang() {
 
 function tryCompile(clangPath) {
   try {
-    // 1. Compile to a temporary file
+    
     execSync(
       `"${clangPath}" --target=wasm32 -nostdlib -O3 -Wl,--no-entry -Wl,--export-all -o "${tmpWasm}" "${cSrc}"`,
       { stdio: "pipe" },
     );
-    // 2. On success, replace the old solver.wasm
+    
     if (existsSync(tmpWasm)) {
       if (existsSync(wasmOut)) unlinkSync(wasmOut);
       renameSync(tmpWasm, wasmOut);
@@ -42,7 +42,7 @@ function tryCompile(clangPath) {
     }
     return false;
   } catch (e) {
-    // 3. On failure, clean up any leftover temporary file
+    
     try { if (existsSync(tmpWasm)) unlinkSync(tmpWasm); } catch {}
     return false;
   }

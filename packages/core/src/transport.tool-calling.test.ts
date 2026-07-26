@@ -122,7 +122,7 @@ async function requestCompletion(
   headers: Record<string, string> = {},
 ): Promise<Response> {
   return transport.fetch(
-    new Request("http://deepseek-oauth.local/v1/chat/completions", {
+    new Request("http:
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
@@ -168,7 +168,7 @@ test(
     assert.equal(data.choices[0].finish_reason, "tool_calls");
     assert.equal(data.choices[0].message.content, null);
     assert.equal(data.choices[0].message.tool_calls?.[0].function.name, "get_weather");
-    assert.equal(apiCalls(), 3); // session create, PoW, completion — no extraction
+    assert.equal(apiCalls(), 3); 
   },
 );
 
@@ -201,7 +201,7 @@ test(
 
     assert.ok(payloads.some((chunk) => Array.isArray(chunk.choices[0].delta.tool_calls)));
     assert.equal(payloads[payloads.length - 1].choices[0].finish_reason, "tool_calls");
-    assert.equal(apiCalls(), 3); // session create, PoW, completion — no extraction
+    assert.equal(apiCalls(), 3); 
   },
 );
 
@@ -245,7 +245,7 @@ test(
     assert.match(capturedPrompt, /Assistant tool call \(id=call_123\)/);
     assert.match(capturedPrompt, /Tool result \(tool_call_id=call_123\)/);
     assert.match(capturedPrompt, /Available tools:/);
-    assert.equal(apiCalls(), 3); // session reused, PoW, primary completion, extraction completion
+    assert.equal(apiCalls(), 3); 
   },
 );
 
@@ -280,7 +280,7 @@ test(
     assert.equal(capturedPrompt, "User: Latest only?");
     assert.equal(data.choices[0].finish_reason, "stop");
     assert.equal(data.choices[0].message.content, "Hello back!");
-    assert.equal(apiCalls(), 2); // PoW, completion — session reused, no extraction
+    assert.equal(apiCalls(), 2); 
   },
 );
 
@@ -308,6 +308,6 @@ test(
     assert.equal(data.choices[0].finish_reason, "tool_calls");
     assert.equal(data.choices[0].message.content, null);
     assert.equal(data.choices[0].message.tool_calls?.[0].function.name, "Read");
-    assert.equal(apiCalls(), 4); // session create, PoW, primary completion, extraction completion
+    assert.equal(apiCalls(), 4); 
   },
 );

@@ -148,7 +148,7 @@ export function parseToolCalls(
     payload: unknown,
   ): OpenAIToolCall[] | null => {
     if (!payload) return null;
-    // Unwrap {"tool_calls": [...]} wrapper
+    
     if (isRecord(payload) && Array.isArray(payload.tool_calls)) {
       const calls = (payload.tool_calls as unknown[])
         .map((c) => normalizeCall(c, allowedNames))
@@ -165,14 +165,14 @@ export function parseToolCalls(
     return call ? [call] : null;
   };
 
-  // XML plural: <tool_calls>[...]</tool_calls>
+  
   const pluralMatch = content.match(/<tool_calls>([\s\S]*?)<\/tool_calls>/i);
   if (pluralMatch) {
     const result = tryNormalize(parsePayload(pluralMatch[1]));
     if (result) return result;
   }
 
-  // XML singular: <tool_call>{...}</tool_call>
+  
   const singularMatch = content.match(/<tool_call>([\s\S]*?)<\/tool_call>/i);
   if (singularMatch) {
     const result = tryNormalize(parsePayload(singularMatch[1]));
@@ -180,7 +180,7 @@ export function parseToolCalls(
   }
 
 
-  // Bare JSON: model may output raw JSON without any wrapper
+  
   const stripped = content
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
