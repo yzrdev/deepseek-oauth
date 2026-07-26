@@ -82,6 +82,6 @@ export async function deleteChatSession(
       chat_session_id: chatSessionId,
     });
   } catch {
-    // best-effort cleanup
+    
   }
 }

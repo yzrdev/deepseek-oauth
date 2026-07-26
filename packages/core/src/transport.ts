@@ -5,6 +5,7 @@ import {
   buildToolPrompt,
   flattenMessages,
   hasToolHistory,
+  normalizeCall,
   parseToolCalls,
   toolProtocolEnabled,
 } from "./tool-calls.js";
@@ -14,6 +15,7 @@ import type {
   OpenAIChatChunk,
   OpenAIChatRequest,
   OpenAIMessage,
+  OpenAIToolCall,
   OpenAIToolDefinition,
   PoWChallenge,
 } from "./types.js";
@@ -27,13 +29,13 @@ interface ModelConfig {
 }
 
 const MODEL_MAP: Record<string, ModelConfig> = {
-  "deepseek-chat": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-instant": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-v3": { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-chat": { model_type: "default", defaultThinking: true, defaultSearch: true },
+  "deepseek-instant": { model_type: "default", defaultThinking: true, defaultSearch: true },
+  "deepseek-v3": { model_type: "default", defaultThinking: true, defaultSearch: true },
   "deepseek-reasoner": { model_type: "expert", defaultThinking: true, defaultSearch: true },
   "deepseek-expert": { model_type: "expert", defaultThinking: true, defaultSearch: true },
   "deepseek-r1": { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-vision": { model_type: "vision", defaultThinking: false, defaultSearch: true },
+  "deepseek-vision": { model_type: "vision", defaultThinking: true, defaultSearch: true },
 };
 
 function resolveModel(model: string): ModelConfig {
@@ -110,6 +112,26 @@ async function handleChatCompletions(
   const extraBody = (raw.extra_body ?? raw.thinking_body ?? {}) as Record<string, unknown>;
   const tools = toolProtocolEnabled(body.tools, body.tool_choice) ? body.tools : undefined;
   const usesToolProtocol = tools !== undefined;
+
+  if (tools && typeof body.tool_choice === "object" && body.tool_choice.type === "function") {
+    const requestedName = body.tool_choice.function.name;
+    const found = tools.some(
+      (t) => t.function.name.toLowerCase() === requestedName.toLowerCase(),
+    );
+    if (!found) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `Invalid tool_choice: '${requestedName}' is not a valid tool name`,
+            type: "invalid_request_error",
+            param: "tool_choice",
+            code: null,
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
   const needsFullContext = usesToolProtocol || hasToolHistory(body.messages);
   const thinking =
     extraBody.thinking !== undefined ? Boolean(extraBody.thinking) : config.defaultThinking;
@@ -122,8 +144,8 @@ async function handleChatCompletions(
 
   const isStream = body.stream !== false;
 
-  let chatSessionId = needsFullContext ? "" : (existingSessionId ?? "");
-  const isReuse = Boolean(existingSessionId) && !needsFullContext;
+  let chatSessionId = existingSessionId ?? "";
+  const isReuse = Boolean(existingSessionId);
 
   const { images, hasImages } = extractImages(body.messages);
   const refFileIds: string[] = [];
@@ -168,9 +190,10 @@ async function handleChatCompletions(
 
   const powResponse = solvePoW(challenge);
   const powEncoded = encodePowResponse(powResponse);
+  const extractionArgs = tools ? { session, chatSessionId, powEncoded } : undefined;
 
   const parentMessageId =
-    isReuse && chatSessionId ? (messageIds?.get(chatSessionId) ?? null) : null;
+    isReuse && chatSessionId && !needsFullContext ? (messageIds?.get(chatSessionId) ?? null) : null;
 
   const maxTokens = body.max_tokens;
 
@@ -209,7 +232,7 @@ async function handleChatCompletions(
   let result: Response;
   if (isStream) {
     result = usesToolProtocol
-      ? await handleToolStreamingResponse(response, body.model, chatSessionId, tools, messageIds)
+      ? await handleToolStreamingResponse(response, body.model, chatSessionId, tools, messageIds, extractionArgs)
       : await handleStreamingResponse(response, body.model, chatSessionId, messageIds);
   } else {
     result = await handleNonStreamingResponse(
@@ -219,6 +242,7 @@ async function handleChatCompletions(
       messageIds,
       prompt,
       tools,
+      extractionArgs,
     );
   }
 
@@ -527,13 +551,15 @@ async function handleStreamingResponse(
     },
   });
 }
-
 async function handleToolStreamingResponse(
   deepseekResponse: Response,
   model: string,
   chatSessionId: string,
   tools: OpenAIToolDefinition[],
-  messageIds?: Map<string, number>,
+  messageIds: Map<string, number> | undefined,
+  extractionArgs:
+    | { session: DeepSeekSession; chatSessionId: string; powEncoded: string }
+    | undefined,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -589,7 +615,14 @@ async function handleToolStreamingResponse(
         return;
       }
 
-      const toolCalls = parseToolCalls(fullContent, tools);
+      let toolCalls = parseToolCalls(fullContent, tools) ?? parseToolCalls(fullReasoning, tools);
+      if (!toolCalls && extractionArgs) {
+        const allContent = [fullContent, fullReasoning].filter(Boolean).join("\n");
+        toolCalls = await llmExtractToolCalls(
+          allContent, tools,
+          extractionArgs.session, extractionArgs.chatSessionId, extractionArgs.powEncoded,
+        );
+      }
       const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
       if (fullReasoning) delta.reasoning_content = fullReasoning;
       if (toolCalls) {
@@ -633,14 +666,16 @@ async function handleToolStreamingResponse(
     },
   });
 }
-
 async function handleNonStreamingResponse(
   deepseekResponse: Response,
   model: string,
   chatSessionId: string,
-  messageIds?: Map<string, number>,
+  messageIds: Map<string, number> | undefined,
   prompt = "",
-  tools?: OpenAIToolDefinition[],
+  tools: OpenAIToolDefinition[] | undefined,
+  extractionArgs:
+    | { session: DeepSeekSession; chatSessionId: string; powEncoded: string }
+    | undefined,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -668,7 +703,16 @@ async function handleNonStreamingResponse(
   }
   parser.flush();
 
-  const toolCalls = tools ? parseToolCalls(fullContent, tools) : null;
+  let toolCalls = tools
+    ? (parseToolCalls(fullContent, tools) ?? parseToolCalls(fullReasoning, tools))
+    : null;
+  if (!toolCalls && tools && extractionArgs) {
+    const allContent = [fullContent, fullReasoning].filter(Boolean).join("\n");
+    toolCalls = await llmExtractToolCalls(
+      allContent, tools,
+      extractionArgs.session, extractionArgs.chatSessionId, extractionArgs.powEncoded,
+    );
+  }
   const message: Record<string, unknown> = {
     role: "assistant",
     content: toolCalls ? null : fullContent,
@@ -700,4 +744,117 @@ async function handleNonStreamingResponse(
   return new Response(JSON.stringify(responseBody), {
     headers: { "content-type": "application/json" },
   });
+}
+
+const TOOL_EXTRACTION_TIMEOUT_MS = parseInt(
+  process.env.DEEPSEEK_TOOL_EXTRACTION_TIMEOUT_MS ?? "10000",
+  10,
+);
+
+
+async function llmExtractToolCalls(
+  content: string,
+  tools: OpenAIToolDefinition[],
+  session: DeepSeekSession,
+  chatSessionId: string,
+  powEncoded: string,
+): Promise<OpenAIToolCall[] | null> {
+  if (!content.trim()) return null;
+
+  const MAX_DESC_LENGTH = 200;
+  const toolSummaries = tools.map((t) => ({
+    name: t.function.name,
+    parameters: t.function.parameters,
+    ...(t.function.description
+      ? { description: t.function.description.slice(0, MAX_DESC_LENGTH) }
+      : {}),
+  }));
+
+  const extractionPrompt = [
+    "You are a tool-call parser. Extract any tool invocations from the assistant response below.",
+    "The response may use XML tags, markdown, JSON, YAML, or plain prose — extract tool calls regardless of format.",
+    "Return ONLY a JSON object with a \"tool_calls\" array. No markdown, no explanation.",
+    "",
+    "Available tools:",
+    JSON.stringify(toolSummaries),
+    "",
+    "Assistant response:",
+    '"""',
+    content,
+    '"""',
+    "",
+    'Output: {"tool_calls":[{"name":"tool_name","arguments":{...}}]} or {"tool_calls":[]}',
+  ].join("\n");
+
+  const extractionBody = {
+    chat_session_id: chatSessionId,
+    prompt: extractionPrompt,
+    thinking_enabled: false,
+    search_enabled: false,
+    max_tokens: 1000,
+    model_type: "default",
+    action: null,
+    preempt: false,
+    ref_file_ids: [],
+  };
+
+  const headers = buildHeaders(session);
+  headers.cookie = buildCookieHeader(session.cookies);
+  headers["x-ds-pow-response"] = powEncoded;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOOL_EXTRACTION_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${BASE_URL}/api/v0/chat/completion`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(extractionBody),
+      signal: controller.signal,
+    });
+
+    if (!response.ok || !response.body) return null;
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = "";
+
+    const parser = new DeepSeekSSEParser((ct, _reasoning, _done, _msgId) => {
+      fullContent += ct;
+    });
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.feed(decoder.decode(value, { stream: true }));
+    }
+    parser.flush();
+
+    const jsonText = fullContent
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "");
+
+    const parsed = JSON.parse(jsonText) as {
+      tool_calls?: Array<{ name?: string; arguments?: unknown }>;
+    };
+
+    if (!parsed?.tool_calls?.length) return null;
+
+    const allowedNames = new Map(
+      tools.map((tool) => [tool.function.name.toLowerCase(), tool.function.name]),
+    );
+
+    const calls: OpenAIToolCall[] = [];
+    for (const candidate of parsed.tool_calls) {
+      const normalized = normalizeCall(candidate, allowedNames);
+      if (normalized) calls.push(normalized);
+    }
+
+    return calls.length > 0 ? calls : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
