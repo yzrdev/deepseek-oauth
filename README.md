@@ -63,9 +63,6 @@ const res = await openai.chat.completions.create({
 
 Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
 
-### Tool calling
-
-The chat completions endpoint supports OpenAI-compatible `tools` and `tool_choice` in streaming and non-streaming requests. Send tool results in the next request to continue the conversation.
 
 ### Vision
 
